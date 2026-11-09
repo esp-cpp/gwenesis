@@ -487,6 +487,10 @@ static void *allocate_shared_hot_memory(size_t size, shared_mem_region_t region 
   return ptr;
 }
 
+// Master cycles into line 224 at which V-int is asserted (Genesis Plus GX's
+// value); see the comment at its use in the frame loops below.
+static constexpr unsigned int GENESIS_VINT_DELAY_CYCLES = 788;
+
 #if !GENESIS_DUAL_CORE && GWENESIS_AUDIO_ACCURATE == 0
 static IRAM_ATTR void run_genesis_frame_sound_on_no_frameskip(int screen_height, int lines_per_frame) {
   static constexpr int vdp_cycles_per_line = VDP_CYCLES_PER_LINE;
@@ -512,6 +516,14 @@ static IRAM_ATTR void run_genesis_frame_sound_on_no_frameskip(int screen_height,
       hint_counter = REG10_LINE_COUNTER;
     }
   }
+
+  // Real hardware asserts V-int ~788 master cycles into the first blanking
+  // line, so a line interrupt raised at the end of the last visible line is
+  // taken FIRST. Asserting V-int right away inverts that order: Sonic 2 / 3 put
+  // the water line at line 223 when the water is off screen, and their H-int
+  // (underwater palette upload) then ran after the V-int had restored the
+  // normal palette -> the whole next frame was drawn with the water palette.
+  m68k_run(system_clock + GENESIS_VINT_DELAY_CYCLES);
 
   if (REG1_VBLANK_INTERRUPT != 0) {
     gwenesis_vdp_status |= STATUS_VIRQPENDING;
@@ -598,6 +610,14 @@ static IRAM_ATTR void cpu_vdp_run_frame(int screen_height, int lines_per_frame) 
       hint_counter = REG10_LINE_COUNTER;
     }
   }
+
+  // Real hardware asserts V-int ~788 master cycles into the first blanking
+  // line, so a line interrupt raised at the end of the last visible line is
+  // taken FIRST. Asserting V-int right away inverts that order: Sonic 2 / 3 put
+  // the water line at line 223 when the water is off screen, and their H-int
+  // (underwater palette upload) then ran after the V-int had restored the
+  // normal palette -> the whole next frame was drawn with the water palette.
+  m68k_run(system_clock + GENESIS_VINT_DELAY_CYCLES);
 
   if (REG1_VBLANK_INTERRUPT != 0) {
     gwenesis_vdp_status |= STATUS_VIRQPENDING;
