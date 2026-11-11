@@ -26,3 +26,4 @@ and a define overrides it:
 | `GENESIS_SKIP_UNDISPLAYABLE_FRAMES` | 1 | Skip the render of frames the display could not take, and (bounded) while behind real time |
 | `GENESIS_MAX_CONSECUTIVE_SKIPS` | 2 | Longest run of skipped renders |
 | `GENESIS_PERF` | 1 | `[genesis perf]` per-frame time breakdown every 300 frames |
+| `GENESIS_HINT_DEBUG` | 0 | `[genesis hint]` line-interrupt / mid-screen palette counters every 60 frames |

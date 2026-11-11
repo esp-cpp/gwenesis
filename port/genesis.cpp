@@ -487,6 +487,69 @@ static void *allocate_shared_hot_memory(size_t size, shared_mem_region_t region 
   return ptr;
 }
 
+// Line-interrupt / palette diagnostics: a `[genesis hint]` line every
+// GENESIS_HINT_DEBUG_FRAMES frames with how many frames raised a visible-line
+// H-int, on which lines, how many were held back by a pending V-int, and how
+// many frames changed the palette mid-screen (water). Debug aid only.
+#ifndef GENESIS_HINT_DEBUG
+#define GENESIS_HINT_DEBUG 0
+#endif
+#if GENESIS_HINT_DEBUG
+static constexpr uint32_t GENESIS_HINT_DEBUG_FRAMES = 60;
+struct GenesisHintDebug {
+  uint32_t frames{0};
+  uint32_t hint_frames{0};      // frames with >= 1 visible-line H-int raised
+  uint32_t hint_blocked{0};     // H-ints not raised because V-int was pending
+  uint32_t hint_off_frames{0};  // frames with reg0 H-int enable clear at line 0
+  uint32_t vpend_at_start{0};   // frames that began with V-int still pending
+  uint32_t pal_changed{0};      // frames whose CRAM changed during active display
+  int first_min{999}, first_max{-1};
+  uint32_t reg10_min{255}, reg10_max{0};
+  bool this_frame_hint{false};
+  uint32_t cram_sum{0};
+};
+static GenesisHintDebug hint_dbg;
+static uint32_t hint_dbg_cram_sum() {
+  uint32_t sum = 0;
+  for (int i = 0; i < 64; ++i) sum = sum * 31 + CRAM[i];
+  return sum;
+}
+static void hint_dbg_frame_start() {
+  auto &d = hint_dbg;
+  d.frames++;
+  d.this_frame_hint = false;
+  if (gwenesis_vdp_status & STATUS_VIRQPENDING) d.vpend_at_start++;
+  if (!REG0_LINE_INTERRUPT) d.hint_off_frames++;
+  const uint32_t r10 = REG10_LINE_COUNTER;
+  if (r10 < d.reg10_min) d.reg10_min = r10;
+  if (r10 > d.reg10_max) d.reg10_max = r10;
+  d.cram_sum = hint_dbg_cram_sum();
+}
+static void hint_dbg_hint(int line, bool raised) {
+  auto &d = hint_dbg;
+  if (!raised) { d.hint_blocked++; return; }
+  if (!d.this_frame_hint) {
+    d.this_frame_hint = true;
+    d.hint_frames++;
+    if (line < d.first_min) d.first_min = line;
+    if (line > d.first_max) d.first_max = line;
+  }
+}
+static void hint_dbg_active_end() {
+  auto &d = hint_dbg;
+  if (hint_dbg_cram_sum() != d.cram_sum) d.pal_changed++;
+  if (d.frames >= GENESIS_HINT_DEBUG_FRAMES) {
+    fmt::print("[genesis hint] frames={} hint={} first_line={}..{} blocked={} hint_off={} vpend_start={} pal_changed={} reg10={}..{}\n",
+               d.frames, d.hint_frames, d.first_min, d.first_max, d.hint_blocked, d.hint_off_frames,
+               d.vpend_at_start, d.pal_changed, d.reg10_min, d.reg10_max);
+    d = GenesisHintDebug{};
+  }
+}
+#define HINT_DBG(x) x
+#else
+#define HINT_DBG(x)
+#endif
+
 // Master cycles into line 224 at which V-int is asserted (Genesis Plus GX's
 // value); see the comment at its use in the frame loops below.
 static constexpr unsigned int GENESIS_VINT_DELAY_CYCLES = 788;
@@ -504,12 +567,18 @@ static IRAM_ATTR void run_genesis_frame_sound_on_no_frameskip(int screen_height,
     z80_run(system_clock);
     gwenesis_SN76489_run(system_clock);
     ym2612_run(system_clock);
+    // The line counter is reloaded from reg 10 at line 0 AFTER the 68k has run
+    // it (as on hardware and in the slow path below): Sonic 3 sets the water
+    // line from its V-int during line 0, and loading the counter before that
+    // write made the water appear only on every other frame.
+    if (scan_line == 0) hint_counter = REG10_LINE_COUNTER;
     gwenesis_vdp_render_line(scan_line);
     genesis_convert_line(scan_line);
 
     if (--hint_counter < 0) {
       if (REG0_LINE_INTERRUPT != 0) {
         hint_pending = 1;
+        HINT_DBG(hint_dbg_hint(scan_line, (gwenesis_vdp_status & STATUS_VIRQPENDING) == 0));
         if ((gwenesis_vdp_status & STATUS_VIRQPENDING) == 0)
           m68k_update_irq(4);
       }
@@ -523,6 +592,7 @@ static IRAM_ATTR void run_genesis_frame_sound_on_no_frameskip(int screen_height,
   // the water line at line 223 when the water is off screen, and their H-int
   // (underwater palette upload) then ran after the V-int had restored the
   // normal palette -> the whole next frame was drawn with the water palette.
+  HINT_DBG(hint_dbg_active_end());
   m68k_run(system_clock + GENESIS_VINT_DELAY_CYCLES);
 
   if (REG1_VBLANK_INTERRUPT != 0) {
@@ -590,6 +660,11 @@ static IRAM_ATTR void cpu_vdp_run_frame(int screen_height, int lines_per_frame) 
     // Release this line to the sound core: its 68k->sound writes are now queued.
     core0_line.store(scan_line, std::memory_order_release);
     PERF_ACC(m68k, t0);
+    // The line counter is reloaded from reg 10 at line 0 AFTER the 68k has run
+    // it (as on hardware and in the slow path): Sonic 3 sets the water
+    // line from its V-int during line 0, and loading the counter before that
+    // write made the water appear only on every other frame.
+    if (scan_line == 0) hint_counter = REG10_LINE_COUNTER;
     if (render_frame) {
       uint32_t t1 = PERF_NOW();
       gwenesis_vdp_render_line(scan_line);
@@ -604,6 +679,7 @@ static IRAM_ATTR void cpu_vdp_run_frame(int screen_height, int lines_per_frame) 
     if (--hint_counter < 0) {
       if (REG0_LINE_INTERRUPT != 0) {
         hint_pending = 1;
+        HINT_DBG(hint_dbg_hint(scan_line, (gwenesis_vdp_status & STATUS_VIRQPENDING) == 0));
         if ((gwenesis_vdp_status & STATUS_VIRQPENDING) == 0)
           m68k_update_irq(4);
       }
@@ -617,6 +693,7 @@ static IRAM_ATTR void cpu_vdp_run_frame(int screen_height, int lines_per_frame) 
   // the water line at line 223 when the water is off screen, and their H-int
   // (underwater palette upload) then ran after the V-int had restored the
   // normal palette -> the whole next frame was drawn with the water palette.
+  HINT_DBG(hint_dbg_active_end());
   m68k_run(system_clock + GENESIS_VINT_DELAY_CYCLES);
 
   if (REG1_VBLANK_INTERRUPT != 0) {
@@ -981,6 +1058,7 @@ void IRAM_ATTR run_genesis_rom() {
   screen_height = REG1_PAL ? 240 : 224;
 
   gwenesis_vdp_render_config();
+  HINT_DBG(hint_dbg_frame_start());
 
 #if GENESIS_SKIP_UNDISPLAYABLE_FRAMES
   // Only we push frames, so if the slot is free now it is still free when this
@@ -1066,6 +1144,7 @@ void IRAM_ATTR run_genesis_rom() {
       if (--hint_counter < 0) {
         if ((REG0_LINE_INTERRUPT != 0) && (scan_line <= screen_height)) {
           hint_pending = 1;
+          HINT_DBG(hint_dbg_hint(scan_line, (gwenesis_vdp_status & STATUS_VIRQPENDING) == 0));
           if ((gwenesis_vdp_status & STATUS_VIRQPENDING) == 0)
             m68k_update_irq(4);
         }
@@ -1074,8 +1153,12 @@ void IRAM_ATTR run_genesis_rom() {
 
       scan_line++;
 
-      // vblank begin at the end of last rendered line
+      // vblank begin at the end of last rendered line (after the 68k has had
+      // GENESIS_VINT_DELAY_CYCLES of the first blanking line to take a pending
+      // line interrupt -- see cpu_vdp_run_frame())
       if (scan_line == screen_height) {
+        HINT_DBG(hint_dbg_active_end());
+        m68k_run(system_clock + GENESIS_VINT_DELAY_CYCLES);
         if (REG1_VBLANK_INTERRUPT != 0) {
           gwenesis_vdp_status |= STATUS_VIRQPENDING;
           m68k_set_irq(6);
