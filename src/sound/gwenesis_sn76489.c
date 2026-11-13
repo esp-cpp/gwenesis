@@ -269,6 +269,12 @@ void gwenesis_sn76489_save_state() {
 
 void gwenesis_sn76489_load_state() {
   SaveState* state = saveGwenesisStateOpenForRead("sn76489");
+  /* the clock step and divisor come from this build's audio configuration
+     (gwenesis_SN76489_Init), not from the build that wrote the save */
+  const float dClock = gwenesis_SN76489.dClock;
+  const int divisor = gwenesis_SN76489.divisor;
   saveGwenesisStateGetBuffer(state, "gwenesis_SN76489", &gwenesis_SN76489, sizeof(gwenesis_SN76489));
+  gwenesis_SN76489.dClock = dClock;
+  gwenesis_SN76489.divisor = divisor;
 
 }
