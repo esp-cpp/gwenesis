@@ -1055,7 +1055,12 @@ void IRAM_ATTR run_genesis_rom() {
   // handle input here (see system.h and use input.pad and input.system)
   auto state = BoxEmu::get().gamepad_state();
 
-  bool sound_enabled = !BoxEmu::get().is_muted();
+  // The Z80 and the sound chips always run: games handshake with their Z80
+  // sound driver (which may pace itself on the YM2612's timers), so stopping
+  // them while muted can leave a game waiting on the driver forever, and a
+  // save made then keeps the frozen driver. Muting only drops the output below.
+  const bool sound_enabled = true;
+  const bool audio_out = !BoxEmu::get().is_muted();
 
   const bool fast_sound_path =
 #if GWENESIS_AUDIO_ACCURATE == 0
@@ -1240,7 +1245,7 @@ void IRAM_ATTR run_genesis_rom() {
   }
 #endif
 
-  if (sound_enabled) {
+  if (audio_out) {
     const int max_audio_frames = AUDIO_BUFFER_LENGTH / AUDIO_OUTPUT_CHANNELS;
     int audio_len = std::min(max_audio_frames, std::max(sn76489_index, ym2612_index));
     const int16_t* sn76489_buffer = gwenesis_sn76489_buffer;
