@@ -511,6 +511,23 @@
 
 
 
+/* ======================================================================== */
+/* ============================ WAIT-LOOP SKIP ============================ */
+/* ======================================================================== */
+/* Every 68000 write and every read outside ROM / work RAM (VDP, I/O, Z80
+ * side) bumps one of these; m68k_run() uses them to recognise a loop that
+ * only polls work RAM (see m68k_run()). */
+#ifdef M68K_IDLE_SKIP
+#define M68K_IDLE_MAX_LOOP_BYTES 16 /* longest loop body considered */
+extern uint32 m68k_idle_writes;
+extern uint32 m68k_idle_io_reads;
+#define M68K_IDLE_WRITE() (m68k_idle_writes++)
+#define M68K_IDLE_IO_READ() (m68k_idle_io_reads++)
+#else
+#define M68K_IDLE_WRITE()
+#define M68K_IDLE_IO_READ()
+#endif
+
 /* ---------------------------- Cycle Counting ---------------------------- */
 
 #ifdef M68K_OVERCLOCK_SHIFT
@@ -863,6 +880,7 @@ INLINE uint32 m68ki_read_8(uint32 address)
 
 	if (ADDRESS_68K(address) <  0x800000) return FETCH8ROM(ADDRESS_68K(address));
 	if (ADDRESS_68K(address) >= 0xFF0000) return FETCH8RAM(ADDRESS_68K(address));
+	M68K_IDLE_IO_READ();
 	return m68k_read_memory_8(ADDRESS_68K(address));
 
 }
@@ -874,6 +892,7 @@ INLINE uint32 m68ki_read_16(uint32 address)
  
  	if (ADDRESS_68K(address) <  0x800000) return FETCH16ROM(ADDRESS_68K(address));
 	if (ADDRESS_68K(address) >= 0xFF0000) return FETCH16RAM(ADDRESS_68K(address));
+	M68K_IDLE_IO_READ();
 	return m68k_read_memory_16(ADDRESS_68K(address));
 
 }
@@ -884,6 +903,7 @@ INLINE uint32 m68ki_read_32(uint32 address)
   m68ki_set_fc(FLAG_S | m68ki_get_address_space()) /* auto-disable (see m68kcpu.h) */
 	if (ADDRESS_68K(address) <  0x800000) return FETCH32ROM(ADDRESS_68K(address));
 	if (ADDRESS_68K(address) >= 0xFF0000) return FETCH32RAM(ADDRESS_68K(address));
+	M68K_IDLE_IO_READ();
 	return m68k_read_memory_32(ADDRESS_68K(address));
 }
 
@@ -891,6 +911,7 @@ INLINE void m68ki_write_8(uint32 address, uint32 value)
 {
 
   m68ki_set_fc(FLAG_S | FUNCTION_CODE_USER_DATA) /* auto-disable (see m68kcpu.h) */
+  M68K_IDLE_WRITE();
         if (ADDRESS_68K(address) >= 0xFF0000) {
           WRITE8RAM(ADDRESS_68K(address), value);
         } else
@@ -901,6 +922,7 @@ INLINE void m68ki_write_16(uint32 address, uint32 value)
 {
 
   m68ki_set_fc(FLAG_S | FUNCTION_CODE_USER_DATA) /* auto-disable (see m68kcpu.h) */
+  M68K_IDLE_WRITE();
         if (ADDRESS_68K(address) >= 0xFF0000) {
           WRITE16RAM(ADDRESS_68K(address), value);
         } else
@@ -911,6 +933,7 @@ INLINE void m68ki_write_32(uint32 address, uint32 value)
 {
 
   m68ki_set_fc(FLAG_S | FUNCTION_CODE_USER_DATA) /* auto-disable (see m68kcpu.h) */
+  M68K_IDLE_WRITE();
         if (ADDRESS_68K(address) >= 0xFF0000) {
           WRITE32RAM(ADDRESS_68K(address), value);
         } else

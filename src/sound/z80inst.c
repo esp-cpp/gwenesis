@@ -350,6 +350,11 @@ static inline void zbank_mem_w8(unsigned int address, unsigned int value) {
   address |= (Z80_BANK << 15);
 
   z80_log(__FUNCTION__,"Z80 bank write %06x: %02x", address, value);
+#ifdef M68K_IDLE_SKIP
+  /* the 68000's wait-loop skip must see the Z80 change 68000 memory */
+  extern unsigned int m68k_idle_writes;
+  m68k_idle_writes++;
+#endif
   m68k_write_memory_8(address, value);
 
 }

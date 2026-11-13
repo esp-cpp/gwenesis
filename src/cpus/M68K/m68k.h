@@ -193,6 +193,15 @@ unsigned int m68k_read_disassembler_16 (unsigned int address);
 unsigned int m68k_read_disassembler_32 (unsigned int address);
 
 /* Write to anywhere */
+/* Wait-loop skip (M68K_IDLE_SKIP, see m68k_run()): on/off at runtime, the
+ * 68000 cycles it did not have to emulate, and forgetting the loop it was
+ * tracking (after memory changed behind the CPU's back, e.g. a state load). */
+#ifdef M68K_IDLE_SKIP
+extern int m68k_idle_skip_enabled;
+extern unsigned int m68k_idle_skipped_cycles;
+void m68k_idle_reset(void);
+#endif
+
 void m68k_write_memory_8(unsigned int address, unsigned int value);
 void m68k_write_memory_16(unsigned int address, unsigned int value);
 void m68k_write_memory_32(unsigned int address, unsigned int value);
