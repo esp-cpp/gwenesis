@@ -2412,10 +2412,20 @@ void YM2612LoadRegs(uint8_t *regs)
   int i;
   for (i=0;i<512;++i)
   {
-    if (i <= 0x30)
-      OPNWriteMode(i, *regs++);
+    /* FNUM1 (0xa0-0xa2) and 3CH FNUM1 (0xa8-0xaa) latch the high byte
+       (FNUM2,BLK) written 4 registers above them, so replay that first; the
+       high bytes are then skipped in their own place */
+    const int r = i & 0xff;
+    const int hi = (r >= 0xa4 && r <= 0xa6) || (r >= 0xac && r <= 0xae);
+    const int lo = (r >= 0xa0 && r <= 0xa2) || (r >= 0xa8 && r <= 0xaa);
+    if (hi)
+      continue;
+    if (lo)
+      OPNWriteReg(i + 4, regs[i + 4]);
+    if (i < 0x30)
+      OPNWriteMode(i, regs[i]);
     else
-      OPNWriteReg(i, *regs++);
+      OPNWriteReg(i, regs[i]);
   }
 
   /* restore outputs connections */
@@ -2519,10 +2529,14 @@ void gwenesis_ym2612_load_state() {
      belong to the firmware and heap layout that wrote the save, so rebuild them
      here -- left stale, a save from another build sends the FM output to
      arbitrary memory (silence plus memory corruption). The divisor depends on
-     this build's sample step, not the one that wrote the save. */
+     this build's sample step, not the one that wrote the save, and so do the
+     phase increments. */
   for (int c = 0; c < 6; c++) {
     FM_CH *CH = &ym2612->CH[c];
     setup_connection(CH, c);
+    /* the saved phase increments assume the saving build's sample step:
+       have the refresh below recompute them for this build */
+    CH->SLOT[SLOT1].Incr = -1;
     for (int s = 0; s < 4; s++) {
       const int r = (c < 3 ? 0x30 + c : 0x130 + (c - 3)) + (s << 2);
       CH->SLOT[s].DT = ym2612->OPN.ST.dt_tab[(OPNREGS[r] >> 4) & 7];
