@@ -167,8 +167,9 @@ void power_on() {
  *
  ******************************************************************************/
 void reset_emulation() {
-  // Send a reset pulse to Z80 CPU
-  z80_pulse_reset();
+  // Hold the Z80 in reset, as at power on: the game releases it (and so
+  // starts it) once its sound driver is loaded
+  z80_start();
   // Send a reset pulse to Z80 M68K
   m68k_pulse_reset();
   // Send a reset pulse to YM2612 chip

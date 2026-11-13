@@ -208,10 +208,10 @@ void z80_write_ctrl(unsigned int address, unsigned int value) {
     if (value == 0) {
       __atomic_store_n(&reset, 1, __ATOMIC_RELEASE);
       z80_wait_until_halted();
-    } else {
-      // De-assert reset (start the Z80). Force the gate first so the Z80 is
-      // halted on core 1 before we mutate its state, then resume.
-      __atomic_store_n(&reset, 1, __ATOMIC_RELEASE);
+    } else if (__atomic_load_n(&reset, __ATOMIC_RELAXED)) {
+      // De-assert reset (start the Z80). Releasing a reset that is not held
+      // does nothing on hardware (see the single-core path below). The gate is
+      // already set; wait for core 1 to halt before we mutate its state.
       z80_wait_until_halted();
       z80_pulse_reset();
       __atomic_store_n(&reset_once, 1, __ATOMIC_RELEASE);
@@ -241,8 +241,11 @@ void z80_write_ctrl(unsigned int address, unsigned int value) {
 
     if (value == 0) {
       reset = 1;
-    } else {
-
+    } else if (reset) {
+      // Only a release of a held reset restarts the Z80. Maximum Carnage writes
+      // 1 here (with the Z80 already running) a few times a frame; restarting
+      // it each time cut its sound driver off mid-way through loading the
+      // level-start song, which then never ended and hung the game.
       z80_pulse_reset();
       reset = 0;
       reset_once = 1;
@@ -350,6 +353,11 @@ static inline void zbank_mem_w8(unsigned int address, unsigned int value) {
   address |= (Z80_BANK << 15);
 
   z80_log(__FUNCTION__,"Z80 bank write %06x: %02x", address, value);
+#ifdef M68K_IDLE_SKIP
+  /* the 68000's wait-loop skip must see the Z80 change 68000 memory */
+  extern unsigned int m68k_idle_writes;
+  m68k_idle_writes++;
+#endif
   m68k_write_memory_8(address, value);
 
 }
@@ -457,6 +465,9 @@ void gwenesis_z80inst_save_state() {
 void gwenesis_z80inst_load_state() {
     SaveState* state = saveGwenesisStateOpenForRead("z80inst");
     saveGwenesisStateGetBuffer(state, "cpu", &cpu, sizeof(Z80));
+    /* configuration, not state: older saves hold 0, which would let the V-int
+       (held asserted through vblank) be taken again and again */
+    cpu.IAutoReset = 1;
     bus_ack = saveGwenesisStateGet(state, "bus_ack");
     reset = saveGwenesisStateGet(state, "reset");
     reset_once = saveGwenesisStateGet(state, "reset_once");

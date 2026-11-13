@@ -21,6 +21,7 @@ extern int vdp_68k_irq_ack(int int_level);
   #endif
 #endif
 
+#include <string.h>
 #include "m68kconf.h"
 #include "m68kcpu.h"
 #include "m68kops.h"
@@ -261,6 +262,73 @@ void m68k_set_irq_delay(unsigned int int_level)
   m68ki_check_interrupts(); /* Level triggered (IRQ) */
 }
 
+#ifdef M68K_IDLE_SKIP
+/* ======================================================================== */
+/* ============================ WAIT-LOOP SKIP ============================ */
+/* ======================================================================== */
+/* Games wait for the next frame by spinning on a flag in work RAM that the
+ * V-int handler changes (e.g. `tst.b (flag).w; bne.s *-4`). Emulating that
+ * spin costs as much host time as real work. A loop iteration that wrote
+ * nothing, read nothing but ROM / work RAM, and ended in the same state it
+ * began (same branch, registers and flags) will repeat identically until
+ * something else changes memory -- and nothing does before the end of the
+ * current run slice: interrupts are delivered between m68k_run() calls, and
+ * every 68000 write, I/O read and Z80 write into 68000 memory is counted. So
+ * the rest of the slice is skipped: the same cycles pass, without running
+ * the instructions. A loop that polls the VDP status / HV counter or a Z80
+ * value (an I/O read) is never skipped, as those change within a line. */
+uint32 m68k_idle_writes = 0;
+uint32 m68k_idle_io_reads = 0;
+int m68k_idle_skip_enabled = 1;
+uint32 m68k_idle_skipped_cycles = 0; /* statistics: cycles not emulated */
+
+static struct {
+  uint32 branch_pc;   /* address of the backward-jumping instruction */
+  uint32 target_pc;   /* where it jumped to */
+  uint32 writes;      /* m68k_idle_writes when it jumped */
+  uint32 io_reads;    /* m68k_idle_io_reads when it jumped */
+  int armed;          /* regs / flags below hold the state at that jump */
+  uint32 regs[16];    /* D0-D7 / A0-A7 */
+  uint32 flags[6];    /* X N Z V C + interrupt mask */
+} idle;
+
+void m68k_idle_reset(void)
+{
+  memset(&idle, 0, sizeof(idle));
+}
+
+/* Called on every short backward jump, so the common cases are cheap: a loop
+ * that writes memory or reads I/O (copies, VDP waits) fails the counter check
+ * and only re-records four words. The registers are snapshotted once the same
+ * jump repeats without either, and compared on the next one. */
+static int m68k_idle_loop(uint32 branch_pc, unsigned int end_cycles)
+{
+  if (idle.branch_pc != branch_pc || idle.target_pc != REG_PC ||
+      idle.writes != m68k_idle_writes || idle.io_reads != m68k_idle_io_reads) {
+    idle.branch_pc = branch_pc;
+    idle.target_pc = REG_PC;
+    idle.writes = m68k_idle_writes;
+    idle.io_reads = m68k_idle_io_reads;
+    idle.armed = 0;
+    return 0;
+  }
+  const uint32 flags[6] = {FLAG_X, FLAG_N, FLAG_Z, FLAG_V, FLAG_C, FLAG_INT_MASK};
+  if (idle.armed && memcmp(idle.regs, REG_DA, sizeof(idle.regs)) == 0 &&
+      memcmp(idle.flags, flags, sizeof(flags)) == 0) {
+    /* one full iteration changed nothing: spin out the slice */
+    if (m68k->cycles < end_cycles) {
+      m68k_idle_skipped_cycles += end_cycles - m68k->cycles;
+      m68k->cycles = end_cycles;
+    }
+    return 1;
+  }
+  memcpy(idle.regs, REG_DA, sizeof(idle.regs));
+  memcpy(idle.flags, flags, sizeof(flags));
+  idle.armed = 1;
+  return 0;
+}
+#endif /* M68K_IDLE_SKIP */
+
 void m68k_run(unsigned int cycles)
 {
     //  printf("m68K_run current_cycles=%d add=%d STOP=%x\n",m68k->cycles,cycles,CPU_STOPPED);
@@ -305,6 +373,10 @@ void m68k_run(unsigned int cycles)
       cpu_hook(HOOK_M68K_E, 0, REG_PC, 0);
 #endif
 
+#ifdef M68K_IDLE_SKIP
+    const uint32 pc = REG_PC;
+#endif
+
     /* Decode next instruction */
     REG_IR = m68ki_read_imm_16();
 
@@ -313,6 +385,13 @@ void m68k_run(unsigned int cycles)
     /* Execute instruction */
     m68ki_instruction_jump_table[REG_IR]();
     USE_CYCLES(CYC_INSTRUCTION[REG_IR]);
+
+#ifdef M68K_IDLE_SKIP
+    /* a short backward jump: maybe the end of a wait loop */
+    if (REG_PC < pc && pc - REG_PC <= M68K_IDLE_MAX_LOOP_BYTES && m68k_idle_skip_enabled &&
+        m68k_idle_loop(pc, cycles))
+      break;
+#endif
 
     /* Trace m68k_exception, if necessary */
     m68ki_exception_if_trace(); /* auto-disable (see m68kcpu.h) */
@@ -368,6 +447,9 @@ void m68k_init(void)
 /* Pulse the RESET line on the CPU */
 void m68k_pulse_reset(void)
 {
+#ifdef M68K_IDLE_SKIP
+  m68k_idle_reset();
+#endif
   /* Clear all stop levels */
   CPU_STOPPED = 0;
 #if M68K_EMULATE_ADDRESS_ERROR
@@ -437,6 +519,9 @@ void gwenesis_m68k_save_state() {
 
 void gwenesis_m68k_load_state() {
   SaveState *state = saveGwenesisStateOpenForRead("m68k");
+#ifdef M68K_IDLE_SKIP
+  m68k_idle_reset();
+#endif
   saveGwenesisStateGetBuffer(state, "REG_D", REG_D, sizeof(REG_D));
 
   m68ki_set_sr(saveGwenesisStateGet(state, "SR"));

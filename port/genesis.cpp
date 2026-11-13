@@ -44,7 +44,9 @@ extern "C" {
 // compile it out entirely. The flag is defined in gwenesis_vdp.h so the VDP's
 // own render-stage counters (vdp_stat_*) follow it too.
 #if GENESIS_PERF
-static constexpr uint32_t GENESIS_PERF_REPORT_FRAMES = 300;
+#ifndef GENESIS_PERF_REPORT_FRAMES
+#define GENESIS_PERF_REPORT_FRAMES 300
+#endif
 struct GenesisPerf {
   // core 0 (CPU cycles)
   uint32_t m68k{0};     // m68k_run() across all scanlines
@@ -87,6 +89,21 @@ static uint32_t perf_sound_queue_dropped() {
 #endif
 }
 
+// Share of the 68000's cycles in the window that the wait-loop skip did not
+// have to emulate (0 when the core is built without M68K_IDLE_SKIP).
+static uint32_t idle_skip_percent() {
+#ifdef M68K_IDLE_SKIP
+  static uint32_t at_start = 0;
+  const uint32_t now = m68k_idle_skipped_cycles;
+  const uint64_t total = uint64_t(perf.frames ? perf.frames : 1) * LINES_PER_FRAME_NTSC * VDP_CYCLES_PER_LINE;
+  const uint32_t pct = uint32_t(uint64_t(now - at_start) * 100 / total);
+  at_start = now;
+  return pct;
+#else
+  return 0;
+#endif
+}
+
 // Print the per-frame averages for the last report window and start a new one.
 // Everything is in microseconds per frame so the buckets can be compared
 // directly against the frame period (16667 us NTSC / 20000 us PAL).
@@ -117,6 +134,7 @@ static void genesis_perf_report() {
              " sleep={}us late={}/{} skipped={}/{} dropped={}/{} blit={}us | core1 snd={}us leash={}us | q_dropped={}"
              " | z80 irq={} busreq={} halted={} wto={} ymw={}"
              " | drawn planes={}us sprites={}us merge={}us"
+             " | idle_skip={}%"
              " | int_free={} int_largest={}\n",
              fps, frame_us, m68k, vdp, convert, barrier, present, other,
              (uint32_t)(perf.sleep_us / n), perf.late, perf.frames, perf.skipped, perf.frames,
@@ -128,6 +146,7 @@ static void genesis_perf_report() {
              us_drawn(vdp_stat_planes_cycles - perf.vdp_planes_at_start),
              us_drawn(vdp_stat_sprites_cycles - perf.vdp_sprites_at_start),
              us_drawn(vdp_stat_merge_cycles - perf.vdp_merge_at_start),
+             idle_skip_percent(),
              heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
   perf = GenesisPerf{};
@@ -432,6 +451,25 @@ extern "C" void gwenesis_io_get_buttons()
 
 void reset_genesis() {
   reset_emulation();
+}
+
+// 68000 clock as a % of stock (genesis_set_cpu_percent()); kept across games
+static int cpu_percent = 100;
+
+static void apply_cpu_percent() {
+#ifdef M68K_OVERCLOCK_SHIFT
+  // cycles charged per instruction scale by 100 / percent, so more
+  // instructions fit in each scanline's share of the frame
+  m68k->cycle_ratio = (100 << M68K_OVERCLOCK_SHIFT) / cpu_percent;
+#endif
+}
+
+void genesis_set_cpu_percent(int percent) {
+  cpu_percent = std::clamp(percent, 100, 200);
+  fmt::print("[genesis] 68000 clock {}%\n", cpu_percent);
+  if (genesis_initialized) {
+    apply_cpu_percent();
+  }
 }
 
 static void reset_genesis_runtime_state() {
@@ -953,6 +991,7 @@ static void init(uint8_t *romdata, size_t rom_data_size) {
   load_cartridge(romdata, rom_data_size);
   power_on();
   reset_genesis();
+  apply_cpu_percent();
 
   if (REG1_PAL) {
     gwenesis_SN76489_Init(3546895,
@@ -1016,7 +1055,12 @@ void IRAM_ATTR run_genesis_rom() {
   // handle input here (see system.h and use input.pad and input.system)
   auto state = BoxEmu::get().gamepad_state();
 
-  bool sound_enabled = !BoxEmu::get().is_muted();
+  // The Z80 and the sound chips always run: games handshake with their Z80
+  // sound driver (which may pace itself on the YM2612's timers), so stopping
+  // them while muted can leave a game waiting on the driver forever, and a
+  // save made then keeps the frozen driver. Muting only drops the output below.
+  const bool sound_enabled = true;
+  const bool audio_out = !BoxEmu::get().is_muted();
 
   const bool fast_sound_path =
 #if GWENESIS_AUDIO_ACCURATE == 0
@@ -1201,7 +1245,7 @@ void IRAM_ATTR run_genesis_rom() {
   }
 #endif
 
-  if (sound_enabled) {
+  if (audio_out) {
     const int max_audio_frames = AUDIO_BUFFER_LENGTH / AUDIO_OUTPUT_CHANNELS;
     int audio_len = std::min(max_audio_frames, std::max(sn76489_index, ym2612_index));
     const int16_t* sn76489_buffer = gwenesis_sn76489_buffer;
