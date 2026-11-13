@@ -36,6 +36,13 @@ void deinit_genesis();
 /// A cart whose init failed should quit to the menu instead of running.
 bool genesis_is_initialized();
 
+/// Run the 68000 at `percent` of its stock clock (100 = stock). More cycles per
+/// frame let games finish their work before the next V-int, removing most
+/// in-game slowdown (e.g. Sonic 3 losing rings drops to half speed at 100%,
+/// none at 125%). Applies at once, and to games started later. Needs the core
+/// built with M68K_OVERCLOCK_SHIFT; ignored otherwise.
+void genesis_set_cpu_percent(int percent);
+
 // Get the Genesis video buffer
 std::span<uint8_t> get_genesis_video_buffer();
 
